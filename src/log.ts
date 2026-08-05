@@ -132,10 +132,10 @@ export function createLineLogger(cb: (line: string) => void): LogConsumer {
 	});
 }
 
-/** implementation of a logger which receives the separate log components (cleanup of log consumer is automatically consumed and enforced) */
-export function createLogger(log: (level: LogLevel, date: string, identity: string, msg: string) => void): LogConsumer {
+/** implementation of a logger which receives the separate log components (cleanup of log consumer is automatically enforced) */
+export function createLogger(log: (level: LogLevel | null, date: string, identity: string, msg: string) => void): LogConsumer {
 	return settleWrapper((level: LogLevel | null, date: string, identity: string, msg: string) => {
-		if (level != null) log(level, date, identity, msg);
+		log(level, date, identity, msg);
 	});
 }
 
