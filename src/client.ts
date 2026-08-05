@@ -35,6 +35,7 @@ class ClientBase extends libLog.Logger {
 	private _server: libServer.Server;
 	private _config: BurntClientConfig;
 	protected _path: string;
+	protected _url: libUrl.URL;
 	protected _translation: Record<string, string | null>[];
 
 	protected constructor(url: libUrl.URL, kind: string, server: libServer.Server, config: BurntClientConfig);
@@ -45,12 +46,12 @@ class ClientBase extends libLog.Logger {
 		if (arg instanceof libUrl.URL) {
 			this._translation = [];
 			this._path = arg.pathname;
-			this.url = arg;
+			this._url = arg;
 		}
 		else {
 			this._translation = arg._translation;
 			this._path = arg._path;
-			this.url = arg.url;
+			this._url = arg._url;
 		}
 
 		this._server = server;
@@ -84,7 +85,9 @@ class ClientBase extends libLog.Logger {
 	}
 
 	/** raw request origin (host will be lower-case; NOT sanitized) */
-	readonly url: libUrl.URL;
+	public get url(): libUrl.URL {
+		return this._url;
+	}
 
 	/** path relative to current module (fully sanitized and clean path, does not end in a slash, unless its root; remains
 	 *	URI encoded in the canonical form; only characters, which may not appear literally in a path component, remain encoded) */
@@ -288,7 +291,7 @@ export enum CachePolicy {
  *	An accept attempt must be fully awaited before completing the handling procedure.
  *
  *	Defaults [Accept-Ranges] normally to 'none' or to 'bytes' for files
- *	Defaults [Vary] to 'Accept-Encoding'.
+ *	Ensures [Vary] contains 'Accept-Encoding'.
  *	Defaults [Connection] to 'close' for upgrade requests and for some error responses.
  */
 export class ClientRequest extends ClientBase {
@@ -307,6 +310,7 @@ export class ClientRequest extends ClientBase {
 		upgrade: UpgradeState;
 		connection: ConnectionState;
 		breaking: Promise<void> | null;
+		urlMalformed: boolean;
 	};
 	private _throughput: {
 		timer: NodeJS.Timeout | null;
@@ -324,11 +328,14 @@ export class ClientRequest extends ClientBase {
 	private _request: libHttp.IncomingMessage;
 
 	private constructor(server: libServer.Server, config: BurntClientConfig, protocol: string, kind: string, request: libHttp.IncomingMessage, response: libHttp.ServerResponse | { socket: libStream.Duplex, head: Buffer, wss: libWs.WebSocketServer }) {
-		super(new libUrl.URL(`${protocol}://${request.headers.host?.toLowerCase() ?? '_'}${request.url}`), kind, server, config);
+		const url = ClientRequest.parseRequestUrl(protocol, request);
+		super(url ?? new libUrl.URL(`${protocol}://_/`), kind, server, config);
+
 		this._patcher = { list: [], index: null };
 
 		let respondedResolve: any = null, completedResolve: any = null, closedResolve: any = null, droppedResolve: any = null;
 		this._state = {
+			urlMalformed: (url == null),
 			respondedPromise: new Promise<void>((resolve) => respondedResolve = resolve),
 			respondedResolve: () => { },
 			completedPromise: new Promise<void>((resolve) => completedResolve = resolve),
@@ -398,6 +405,10 @@ export class ClientRequest extends ClientBase {
 		this._request.socket.setTimeout((this.config.throughputWindow + this.config.throughputGrace) * 2);
 	}
 
+	private static parseRequestUrl(protocol: string, request: libHttp.IncomingMessage): libUrl.URL | null {
+		try { return new libUrl.URL(`${protocol}://${request.headers.host?.toLowerCase() ?? '_'}${request.url}`); }
+		catch (_) { return null; }
+	}
 	private failThroughput(): void {
 		if (this.config.throughputThreshold <= 0 || !this._throughput.active || this.dropped)
 			return;
@@ -643,11 +654,11 @@ export class ClientRequest extends ClientBase {
 	private closeHeader(status: libBase.StatusType, headers: Record<string, string>, content: { media: libBase.MediaType, size?: number } | null, logDetail: string | null): boolean {
 		const logMessage = libLog._logs.buildResponseDescription(status.code, status.msg, (content == null ? null : { size: content.size, type: content.media.mediaType }), logDetail);
 
-		/* configure the default header values */
+		/* configure the default header values (always extend the vary-header by the encoding,
+		*	as any custom vary must not suppress it while encoding negotiation is performed) */
 		if (!('Accept-Ranges' in headers))
 			headers['Accept-Ranges'] = 'none';
-		if (!('Vary' in headers))
-			headers['Vary'] = 'Accept-Encoding';
+		libHelper.extendVaryHeader(headers);
 		if (!('Date' in headers))
 			headers['Date'] = new Date().toUTCString();
 		for (const [key, value] of Object.entries(this.config.commonHeaders)) {
@@ -711,8 +722,6 @@ export class ClientRequest extends ClientBase {
 		let encoding: libBase.EncodingType | null = null;
 		let contentSize: number | null = content?.body?.byteLength ?? null;
 		if (content != null) {
-			headers['Vary'] = 'Accept-Encoding';
-
 			/* check if the data should be encoded (if the size is not known, pretend the buffer to be large enough) */
 			encoding = libHelper.negotiateEncoding(this.headers['accept-encoding'] ?? null, contentSize, content.media);
 			if (encoding != null) {
@@ -767,7 +776,6 @@ export class ClientRequest extends ClientBase {
 				return cb(null);
 			return this.sendClientWrite(resp, chunk, last, cb);
 		}
-		resp.headers['Vary'] = 'Accept-Encoding';
 
 		/* lookup the dynamic encoder (for [head] and no explicit content, default to size being valid to just
 		*	assume an encoding - can always be disabled in the real run, should the data be too short) */
@@ -1136,6 +1144,12 @@ export class ClientRequest extends ClientBase {
 		/* validate the HTTP version (to ensure a host value is provided) */
 		if (this._request.httpVersion == '1.0') {
 			this.respondHttpVersionNotSupported('1.1');
+			return false;
+		}
+
+		/* validate that the request url could be constructed */
+		if (this._state.urlMalformed) {
+			this.respondBadRequest({ reason: 'Malformed request url or host header' });
 			return false;
 		}
 
@@ -1629,7 +1643,7 @@ export class ClientRequest extends ClientBase {
 
 		/* update the cached reader to read the encoded content (no encoding if already encoded or a range request has occurred,
 		*	as the encoded byte representation might not be stable; this is also the reason why the e-tag must be forced to weak,
-		*	as the content cannot be guaranteed to be stabled across cache flushes or reloads) */
+		*	as the content cannot be guaranteed to be stable across cache flushes or reloads) */
 		const media = (options.media ?? libHelper.lookupMediaTypeFromFile(filePath) ?? libBase.Media.Unknown);
 		let dynamicEncoder = ((options.encoded != null || range.state != libHelper.RangeState.noRange) ? null : libHelper.negotiateEncoding(this.headers['accept-encoding'] ?? null, cached.fileSize(), media));
 		let reader: null | libCache.EncodedCache = null;
@@ -1639,7 +1653,6 @@ export class ClientRequest extends ClientBase {
 		/* mark byte-ranges to be supported in principle and add the caching properties */
 		const headers = { ...options.headers };
 		const etag = `${(dynamicEncoder != null) ? 'W/' : ''}"${cached.uniqueId()}"`;
-		headers['Vary'] = 'Accept-Encoding';
 		if (dynamicEncoder != null || options.encoded != null)
 			headers['Content-Encoding'] = dynamicEncoder?.name ?? options.encoded!;
 		headers['Accept-Ranges'] = (dynamicEncoder != null ? 'none' : 'bytes');

@@ -16,12 +16,12 @@
 	"types": "dist/index.d.ts",
 	"exports": {
 		".": {
-			"default": "./dist/index.js",
-			"types": "./dist/index.d.ts"
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
 		},
 		"./*.js": {
-			"default": "./dist/*.js",
-			"types": "./dist/*.d.ts"
+			"types": "./dist/*.d.ts",
+			"default": "./dist/*.js"
 		},
 		"./package.json": "./package.json"
 	},
@@ -41,6 +41,6 @@
 		"typescript": "^6.0.3"
 	},
 	"engines": {
-		"node": ">=22.0.0"
+		"node": ">=22.15.0"
 	}
 }

@@ -7,11 +7,11 @@ A lightweight TypeScript framework for hosting isolated modules behind HTTP/HTTP
 The server integrates various automation features, such as error handling, validations, caching... Further, it contains integrated logging for proper connection tracing and logging.
 
 ## Installation
-Only depends on [`ws`](https://github.com/websockets/ws) at runtime.
+The only runtime dependency is [`ws`](https://github.com/websockets/ws) (plus its type definitions for TypeScript consumers).
 
 	$ npm install @bjoernboss/mws
 
-Requires Node.js 22 or later.
+Requires Node.js 22.15 or later.
 
 ## Quick Start
 
@@ -45,7 +45,7 @@ server.listen(new HelloModule(), {
 
 ## Logging System
 
-The framework defaults to write all of its logs out to `mws.logGlobal`. It in turn passes the formatted logs to all of the loggers registered via `mws.addLogger`. For convenience, there exist colorful console loggers, file loggers (writes logging contents to a file), log filters, or request loggers, which format the multiple request related logs into single-line logs.
+The framework defaults to write all of its logs out to `mws.logGlobal`. It in turn passes the raw log components (level, date, identity, message) to all of the loggers registered via `mws.addLogger`; formatting happens inside the individual logger implementations. For convenience, there exist colorful console loggers, file loggers (writes logging contents to a file), log filters, or request loggers, which format the multiple request related logs into single-line logs.
 
 ## Listeners
 
@@ -54,7 +54,7 @@ The framework defaults to write all of its logs out to `mws.logGlobal`. It in tu
 ```typescript
 const listener = server.listen(handler, { port: 8080 });
 
-listener.on('listening', (address) => console.log(`Listening on port ${address.port}`));
+listener.on('listening', (address) => console.log(`Listening on port ${address?.port}`));
 listener.on('failed', (err) => console.error(`Failed: ${err.message}`));
 listener.on('stopped', () => console.log('Stopped'));
 ```
@@ -260,11 +260,11 @@ const text = await client.receiveAllText('utf-8', 1_000_000);
 /* as a readable stream */
 const stream = client.receiveData(1_000_000);
 
-/* directly to a file (atomic: writes to temp file, then renames) */
-await client.receiveToFile('/uploads/file.bin', 10_000_000);
+/* directly to a file via the cache (atomic: writes to a temp file, then renames) */
+await server.cache.write('/uploads/file.bin', client.receiveData(10_000_000));
 
-/* directly to a file (create-only: fails if the file already exists) */
-const created = await client.receiveToFile('/uploads/file.bin', 10_000_000, { create: true });
+/* directly to a file via the cache (create-only: throws if the file already exists) */
+await server.cache.write('/uploads/file.bin', client.receiveData(10_000_000), { create: true });
 ```
 
 ### Responding
@@ -298,7 +298,7 @@ Every response method accepts an optional `cache` parameter of type `CachePolicy
 |---|---|---|
 | `immutable` | `public, max-age=2592000, immutable` | `tryRespondFile` (versioned paths) |
 | `static` | `public, no-cache` | `tryRespondFile` (normal files) |
-| `private` | `private, no-cache` | `respond`, `respondData`, `respondHtml`, and all convenience methods |
+| `private` | `private, no-cache` | `respond`, `respondData`, `respondHtml`, and all other convenience methods |
 | `sensitive` | `no-cache, no-store, max-age=0, must-revalidate` | `respondInternalError`, `respondForbidden` |
 | `none` | *(no header set)* | *(only when explicitly chosen)* |
 

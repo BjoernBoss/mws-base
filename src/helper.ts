@@ -95,12 +95,28 @@ export function negotiateEncoding(accept: string | null, atLeastSize: number | n
 	if (bestScore != null && bestScore != '*')
 		return (bestScore == 'identity' ? null : EncodingNameToEncodingTypeMapping[bestScore]);
 
-	/* lookup the best entry not mentioned (because '*' was the best match) */
+	/* lookup the best entry not mentioned (because '*' was the best match; skip
+	*	identity, as it translates to no encoding and does not need to be applied) */
 	for (const encoding in EncodingNameToEncodingTypeMapping) {
-		if (!(encoding in scores))
+		if (!(encoding in scores) && encoding != 'identity')
 			return EncodingNameToEncodingTypeMapping[encoding];
 	}
 	return null;
+}
+
+/** ensure 'Accept-Encoding' is contained in the [Vary] header, as responses are subject to encoding negotiation (matches the header
+ *	key and existing entries case-insensitively; a value of '*' is left untouched, as it already subsumes all request headers) */
+export function extendVaryHeader(headers: Record<string, string>): void {
+	const key = Object.keys(headers).find((k) => k.toLowerCase() == 'vary');
+	if (key == null) {
+		headers['Vary'] = 'Accept-Encoding';
+		return;
+	}
+
+	/* check if the existing value already covers the encoding and otherwise extend it */
+	const entries = splitAndTrimList(headers[key], ',', false).map((v) => v.toLowerCase()).filter((v) => v != '');
+	if (!entries.includes('*') && !entries.includes('accept-encoding'))
+		headers[key] = (entries.length == 0 ? 'Accept-Encoding' : `${headers[key]}, Accept-Encoding`);
 }
 
 export enum RangeState {
@@ -110,7 +126,8 @@ export enum RangeState {
 	malformed
 }
 
-/** parse an http header range request (first and last are correct for all valid range states; will be [0,-1] for an emtpy file) */
+/** parse an http header range request (first and last are correct for all valid range states; will be [0,-1] for
+ *	an empty file; last positions past the file size and over-long suffix lengths are clamped to the file size) */
 export function parseRangeHeader(range: string | null, fileSize: number): { first: number, last: number, state: RangeState } {
 	if (range == null)
 		return { first: 0, last: fileSize - 1, state: RangeState.noRange };
@@ -152,16 +169,23 @@ export function parseRangeHeader(range: string | null, fileSize: number): { firs
 
 	/* check if the range has an offset and potentially also an end */
 	if (first != null) {
-		if (last == null)
-			last = fileSize - 1;
-		if (first > last || last >= fileSize)
+		/* an explicit last position before the first position is an invalid range specification */
+		if (last != null && first > last)
+			return { first: 0, last: 0, state: RangeState.malformed };
+
+		/* clamp the last position to the file size and validate that the first position is satisfiable */
+		if (first >= fileSize)
 			return { first: 0, last: 0, state: RangeState.issue };
+		if (last == null || last >= fileSize)
+			last = fileSize - 1;
 		return { first, last, state: RangeState.valid };
 	}
 
-	/* validate the offset at the end */
-	if (last! > fileSize || last! == 0)
+	/* validate the suffix length and clamp it to the file size (an over-long suffix selects the entire file) */
+	if (last! == 0 || fileSize == 0)
 		return { first: 0, last: 0, state: RangeState.issue };
+	if (last! > fileSize)
+		last = fileSize;
 	return { first: fileSize - last!, last: fileSize - 1, state: RangeState.valid };
 }
 
@@ -197,7 +221,7 @@ export function timestampCompare(a: string, b: string): number | null {
 	return (_a - _b);
 }
 
-/** split a list value while removing whitespace and optionally respecting quotes (returns empty list on validly quoted strings) */
+/** split a list value while removing whitespace and optionally respecting quotes (returns empty list on invalidly quoted strings) */
 export function splitAndTrimList(content: string | null, separator: string, quotesAware: boolean): string[] {
 	if (content == null)
 		return [];

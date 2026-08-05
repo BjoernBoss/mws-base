@@ -97,5 +97,5 @@ export const Encoding = {
 	}
 } as const satisfies Record<string, EncodingType>
 
-/** minimum size for content is considered encodable */
+/** minimum size for content to be considered encodable */
 export const MIN_ENCODING_SIZE: number = 1_000;

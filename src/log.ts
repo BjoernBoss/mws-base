@@ -147,12 +147,12 @@ export enum PreserveMode {
 	/** preserve the last log file to 'filePath.old' */
 	last,
 
-	/** preserve all last log files to 'filePath.%time%.old */
+	/** preserve all last log files to 'filePath.%time%.old' */
 	all
 }
 
 /** implementation of a file logger, which logs into the file-path and optionally preserves old logs
-*	(Note: contains a timer, server shutdown should clear all loggers to ensure fast shutdown) */
+*	(Note: contains a timer, detach the logger via its detacher on shutdown to ensure fast shutdown) */
 export function createFileLogger(filePath: string, options?: { flushingDelayMs?: number, bufMaxLineCount?: number, sizeSwapFile?: number, preserve?: PreserveMode }): LogConsumer {
 	/* setup the logging state (ignore any errors, as they cannot be logged) */
 	let fileHandle: number | null = null;
@@ -230,7 +230,7 @@ export function createFileLogger(filePath: string, options?: { flushingDelayMs?:
 	});
 }
 
-/** implementation of a log filter, which only forwards logs, which the filter callback deem relevant, based on the level and identity */
+/** implementation of a log filter, which only forwards logs, which the filter callback deem relevant, based on the level, identity, and message */
 export function createLogFilter(target: LogConsumer, filter: (level: LogLevel, identity: string, msg: string) => boolean): LogConsumer {
 	return settleWrapper((level: LogLevel | null, date: string, identity: string, msg: string) => {
 		if (level == null)
@@ -247,7 +247,7 @@ export function createLogFilter(target: LogConsumer, filter: (level: LogLevel, i
 *	(unknown placeholders are left as-is, missing values are set to '-'; unknown request behavior is logged as an issue).
 *	The logger consumes request flow logs (connect > response/issue/socket > completed).
 *	- all requests: %{ENDPOINT} (endpoint), %{METHOD} (method), %{REMOTE} (remote), %{URL} (url), %{AGENT} (user-agent)
-*	- response: %{CODE}, %{STATUS}, %{SIZE}, %{TYPE}, %{DETAIL} (detail contains additonal response data or the file sent)
+*	- response: %{CODE}, %{STATUS}, %{SIZE}, %{TYPE}, %{DETAIL} (detail contains additional response data or the file sent)
 *		=> Default: '%{METHOD} [%{URL}] => %{CODE} (%{STATUS}) [%{DETAIL}]'
 *	- issue: %{WHAT}, %{REASON}
 *		=> Default: '%{METHOD} [%{URL}] => %{WHAT}'
@@ -297,7 +297,7 @@ export function createRequestLogger(target: LogConsumer, pattern?: { response?: 
 			return true;
 		}
 
-		/* check if the response has been sent (a file response uses the file pattern, if provided) */
+		/* check if the response has been sent (a file response rewrites the detail to the file path) */
 		const response = msg.match(_logs.REQUEST_RESPONSE_REGEX);
 		if (response != null) {
 			const params: Record<string, string> = { CODE: response[1], STATUS: response[2], SIZE: response[3] ?? '-', TYPE: response[4] ?? '-' };
@@ -340,10 +340,12 @@ export function createRequestLogger(target: LogConsumer, pattern?: { response?: 
 	});
 }
 
-/** logger class to extend, supporting various logging classes, and writing to the registered log consumer */
+/** create a standalone logger for the given identity */
 export function createLoggerIdentity(identity: string): Logger {
 	return new Logger(identity);
 }
+
+/** logger class to extend, supporting various logging levels, and writing to the registered log consumers */
 export class Logger {
 	private _logIdentity: string;
 

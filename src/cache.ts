@@ -12,6 +12,7 @@ const UNIQUE_ID_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
 const UNIQUE_ID_LENGTH = 10;
 const ID_EXTENSION_REGEX = RegExp(`^\\.[${UNIQUE_ID_CHARS}]{${UNIQUE_ID_LENGTH}}$`, 'i');
 const FileReadableBrand = Symbol('mws.file-readable');
+let nextTemporaryId = 0;
 
 function readStats(path: string): null | [number, number] {
 	try {
@@ -64,7 +65,8 @@ function sniffStream(stream: libStream.Readable, expected: number | null, callba
 	return sniffer;
 }
 async function atomicWrite(path: string, content: Buffer | libStream.Readable, logger: libLog.Logger, options?: { what?: string, temporary?: string, create?: boolean, mtime?: number }): Promise<void> {
-	const tempPath = (options?.temporary ?? `${path}.temp`), create = (options?.create === true);
+	/* default temporary names are unique to prevent concurrent writes to the same path from corrupting each other */
+	const tempPath = (options?.temporary ?? `${path}.${process.pid}-${++nextTemporaryId}.temp`), create = (options?.create === true);
 	if (options?.what != '')
 		logger.trace(`Writing ${options?.what ?? 'data'} to [${path}]`);
 
@@ -372,7 +374,7 @@ class ImmutableManager {
 		}
 
 		if (corrupted > 0)
-			this.logger.error(`Immutable loaded state [${path}] contained [${corrupted}] malformed entires`);
+			this.logger.error(`Immutable loaded state [${path}] contained [${corrupted}] malformed entries`);
 		return output;
 	}
 	private updateEntry(entry: ImmutableEntry, checkFreshness: boolean, firstAssign: boolean): boolean {
@@ -464,9 +466,11 @@ class ImmutableManager {
 		if (!this.immutableTagging)
 			return [null, false];
 
-		/* check if it might be an immutable-tagged path */
-		const [base, temp, extension] = libHelper.splitFileExtension(path);
-		const [_, name, tempId] = libHelper.splitFileExtension(temp);
+		/* check if it might be an immutable-tagged path (for files without an extension, the id itself is the last extension) */
+		let [base, temp, extension] = libHelper.splitFileExtension(path);
+		let [_, name, tempId] = libHelper.splitFileExtension(temp);
+		if (tempId == '')
+			tempId = extension, extension = '', name = temp;
 		if (!tempId.match(ID_EXTENSION_REGEX))
 			return [null, false];
 		const unique = tempId.substring(1);
@@ -687,8 +691,8 @@ function EncodedCache(cache: CacheManager, reader: Cached, entry: CacheEntry | n
 		stream: (options?: { eager?: boolean }) => makeStream(options?.eager),
 		read: () => StreamToAsync(makeStream()),
 		readSync: () => {
-			/* will be returned as buffer anyways, so might as well
-			*	try to write it back to the cache, no matter if its too large */
+			/* will be returned as buffer anyways, so might as well try to write it
+			*	back to the cache (automatically rejected again, if its too large) */
 			const data = encoding.encodeBuffer(reader.readSync());
 			cache.addEncoding(reader.filePath(), data, age, encoding.name);
 			return data;
@@ -803,7 +807,7 @@ export class CacheHost extends libLog.Logger {
 		}
 		const isImmutable = (immutable != null);
 
-		/* check if does not need to be checked and the entry is already in the cache, in which case the file doesn't even need to be checked */
+		/* check if the entry is already in the cache and no freshness validation is required, in which case the file itself does not need to be checked */
 		let entry = ((checkFreshness || this._config.alwaysValidate) ? null : this._cacheManager.find(path, null));
 		if (entry != null && (immutable == null || (immutable.size == entry.data.byteLength && immutable.mtime == entry.mtime)))
 			return new AlreadyCached(this._cacheManager, path, entry, isImmutable);
@@ -899,8 +903,9 @@ export class CacheHost extends libLog.Logger {
 
 	/** [throws] write data atomically to the disk and conditionally update the cache (designed for modules
 	 *	to interact with; writes as utf-8; writes data first to temporary file and then replaces the file
-	 *	atomically; for create: must not replace an existing file; for mtime: apply the given modified-time
-	 *	in milliseconds since the epoch to the written file; empty what string will not log anything) */
+	 *	atomically; for create: must not replace an existing file and writes directly to the destination,
+	 *	hence not atomically; for mtime: apply the given modified-time in milliseconds since the epoch to
+	 *	the written file; empty what string will not log anything) */
 	public async write(path: string, data: Buffer | string | libStream.Readable | FileReadable, options?: { what?: string, temporary?: string, create?: boolean, mtime?: number }): Promise<void> {
 		let collected: Buffer | null = null;
 		if (typeof data == 'string')
@@ -913,11 +918,14 @@ export class CacheHost extends libLog.Logger {
 		/* write the data atomically to the destination (let errors propagate out) */
 		await atomicWrite(path, data, this, { what: (options?.what ?? 'via cache'), temporary: options?.temporary, create: options?.create, mtime: options?.mtime });
 
-		/* check if the data are available and can be written to the cache (unsized streamed data will not be cached, as their size cannot be determined) */
+		/* check if the data are available and can be written to the cache (unsized streamed data will not be cached, as their
+		*	size cannot be determined; drop any existing cache entry in that case, as it now contains outdated content) */
 		if (collected != null)
 			data = collected;
-		if (data instanceof libStream.Readable || !this._cacheManager.cacheable(data.byteLength))
+		if (data instanceof libStream.Readable || !this._cacheManager.cacheable(data.byteLength)) {
+			this._cacheManager.drop(path);
 			return;
+		}
 		const age = this._cacheManager.allocAge();
 
 		/* fetch the new state and update the cache (let errors propagate out; only if the write-state seems consistent) */

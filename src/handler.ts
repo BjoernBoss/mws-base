@@ -34,7 +34,7 @@ export interface AttachedModule {
 	handle(client: libClient.ClientRequest, options?: { params?: Params, translate?: PathTranslation }): Promise<void>;
 
 	/** detach the module from the parent module handler (registered unlinked callback will be invoked before this promise
-	 *	is completed; clients dispatched to the module will not be disconnected directly any may still be active; if the
+	 *	is completed; clients dispatched to the module will not be disconnected directly and may still be active; if the
 	 *	unlink results in the module being stopped, the promise first resolves once the module has fully stopped, and must
 	 *	therefore not be awaited from within the stop handling of the attached module itself, as this can lead to deadlocks) */
 	unlink(): Promise<void>;
